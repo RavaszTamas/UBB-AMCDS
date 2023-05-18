@@ -53,13 +53,12 @@ public final class MessageComposer {
   }
 
   public static CommunicationProtocol.Message createNNARInternalRead(
-          String systemId,
-      String toAbstractionId, int readId) {
+      String systemId, String toAbstractionId, int readId) {
     return CommunicationProtocol.Message.newBuilder()
         .setType(CommunicationProtocol.Message.Type.NNAR_INTERNAL_READ)
         .setFromAbstractionId(toAbstractionId)
         .setToAbstractionId(toAbstractionId)
-            .setSystemId(systemId)
+        .setSystemId(systemId)
         .setNnarInternalRead(
             CommunicationProtocol.NnarInternalRead.newBuilder().setReadId(readId).build())
         .build();
@@ -164,7 +163,7 @@ public final class MessageComposer {
         .setSystemId(systemId)
         .setFromAbstractionId("app.nnar[" + registerId + "]")
         .setToAbstractionId("app")
-            .setType(CommunicationProtocol.Message.Type.NNAR_WRITE_RETURN)
+        .setType(CommunicationProtocol.Message.Type.NNAR_WRITE_RETURN)
         .setNnarWriteReturn(CommunicationProtocol.NnarWriteReturn.newBuilder().build())
         .build();
   }
@@ -256,7 +255,7 @@ public final class MessageComposer {
     //    System.out.println("--------------");
     //    System.out.println(message);
     //    System.out.println(
-    System.out.println(message);
+    //    System.out.println(message);
     return CommunicationProtocol.Message.newBuilder()
         .setToAbstractionId(message.getToAbstractionId())
         .setSystemId(message.getSystemId())
@@ -316,5 +315,50 @@ public final class MessageComposer {
         .setNnarRead(CommunicationProtocol.NnarRead.newBuilder().build())
         .setAppWrite(CommunicationProtocol.AppWrite.newBuilder().setRegister(registerId).build())
         .build();
+  }
+
+  public static CommunicationProtocol.Message createBebBroadcastNewEpoch(String systemId, int TS) {
+    return CommunicationProtocol.Message.newBuilder()
+        .setType(CommunicationProtocol.Message.Type.BEB_BROADCAST)
+        .setToAbstractionId("app.ec.beb.pl")
+        .setSystemId(systemId)
+        .setBebBroadcast(
+            CommunicationProtocol.BebBroadcast.newBuilder()
+                .setMessage(
+                    CommunicationProtocol.Message.newBuilder()
+                        .setToAbstractionId("app.ec")
+                        .setType(CommunicationProtocol.Message.Type.EC_INTERNAL_NEW_EPOCH)
+                        .setEcInternalNewEpoch(
+                            CommunicationProtocol.EcInternalNewEpoch.newBuilder()
+                                    .setTimestamp(TS)
+                                    .build())
+                        .build())
+                .build())
+        .build();
+  }
+
+  public static CommunicationProtocol.Message createStartEpoch(CommunicationProtocol.ProcessId trusted, int newTs){
+    return CommunicationProtocol.Message.newBuilder()
+            .setType(CommunicationProtocol.Message.Type.EC_START_EPOCH)
+            .setEcStartEpoch(CommunicationProtocol.EcStartEpoch.newBuilder()
+                    .setNewLeader(CommunicationProtocol.ProcessId.newBuilder(trusted).build())
+                    .setNewTimestamp(newTs)
+                    .build())
+            .build();
+  }
+  public static CommunicationProtocol.Message createSendNack(String systemId,CommunicationProtocol.ProcessId destination,String toAbstraction){
+    return  CommunicationProtocol.Message.newBuilder()
+            .setType(CommunicationProtocol.Message.Type.PL_SEND)
+            .setToAbstractionId(toAbstraction+".pl")
+            .setSystemId(systemId)
+            .setPlSend(CommunicationProtocol.PlSend.newBuilder()
+                    .setMessage(CommunicationProtocol.Message.newBuilder()
+                            .setToAbstractionId(toAbstraction)
+                            .setType(CommunicationProtocol.Message.Type.EC_INTERNAL_NACK)
+                            .setEcInternalNack(CommunicationProtocol.EcInternalNack.newBuilder().build())
+                            .build())
+                    .setDestination(destination)
+                    .build())
+            .build();
   }
 }

@@ -5,13 +5,16 @@ import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import main.CommunicationProtocol;
+import main.pipelines.AbstractionPipeline;
+import main.pipelines.PipelineExecutor;
 import main.server.QueueProcessor;
 import main.utils.MessageComposer;
 
-public class PerfectLink implements MessagingAlgorithm {
+public class PerfectLink extends AbstractMessagingAlgorithm {
   private final QueueProcessor queueProcessor;
 
-  public PerfectLink(QueueProcessor queueProcessor) {
+  public PerfectLink(String id, PipelineExecutor pipelineExecutor, QueueProcessor queueProcessor) {
+    super(id, pipelineExecutor);
     this.queueProcessor = queueProcessor;
   }
 
@@ -21,7 +24,14 @@ public class PerfectLink implements MessagingAlgorithm {
       CommunicationProtocol.Message networkMessage =
           MessageComposer.convertPlSendMessageToNetworkMessage(
               this.queueProcessor.getMyIp(), this.queueProcessor.getListeningPort(), message);
-      System.out.println(this.queueProcessor.getIndex() + " - Sending to " + message.getPlSend().getDestination().getPort() + " " + message.getPlSend().getMessage().getType() + " " + message.getToAbstractionId());
+      //            System.out.println(
+      //                this.queueProcessor.getIndex()
+      //                    + " - Sending to "
+      //                    + message.getPlSend().getDestination().getPort()
+      //                    + " "
+      //                    + message.getPlSend().getMessage().getType()
+      //                    + " "
+      //                    + message.getToAbstractionId());
       this.sendTcpMessage(
           networkMessage,
           message.getPlSend().getDestination().getHost(),
@@ -50,18 +60,17 @@ public class PerfectLink implements MessagingAlgorithm {
 
   @Override
   public void deliver(CommunicationProtocol.Message message) {
+
     CommunicationProtocol.Message contentMessage = message.getPlDeliver().getMessage();
-    //    System.out.println("asdasdsa");
-    //
-    // System.out.println(CommunicationProtocol.Message.newBuilder(contentMessage).setSystemId(message.getSystemId()).setToAbstractionId(message.getToAbstractionId()).build());
-    //    System.out.println("asdasdsa");
-    this.queueProcessor.addMessage(
+    this.pipelineExecutor.submitToPipeline(
+        message.getToAbstractionId(),
         CommunicationProtocol.Message.newBuilder(contentMessage)
             .setPlDeliver(
                 CommunicationProtocol.PlDeliver.newBuilder()
                     .setSender(message.getPlDeliver().getSender())
                     .build())
             .setSystemId(message.getSystemId())
+            .setToAbstractionId(message.getToAbstractionId())
             .build());
   }
 }

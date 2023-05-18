@@ -7,8 +7,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingDeque;
 import main.CommunicationProtocol;
 import main.algorithms.BestEffortBroadcast;
-import main.algorithms.NNAtomicRegister;
-import main.algorithms.PerfectLink;
+import main.pipelines.PipelineExecutor;
 import main.utils.MessageComposer;
 import main.utils.Utils;
 
@@ -21,11 +20,10 @@ public class QueueProcessor implements Runnable {
   private final int index;
   private final String hubIp;
   private final int hubPort;
-  private final PerfectLink perfectLink;
-  private final BestEffortBroadcast bestEffortBroadcast;
-  private final NNAtomicRegister atomicRegister;
   private final BlockingQueue<CommunicationProtocol.Message> messages;
   private final Map<String, List<CommunicationProtocol.ProcessId>> systems;
+  private final Map<String, PipelineExecutor> pipelineExecutorMap;
+  private CommunicationProtocol.ProcessId ownerProcess;
 
   public QueueProcessor(
       String hubIp, int hubPort, String myIp, int listeningPort, String owner, int index) {
@@ -37,10 +35,8 @@ public class QueueProcessor implements Runnable {
     this.owner = owner;
     this.messages = new LinkedBlockingDeque<>();
     this.systems = new HashMap<>();
+    this.pipelineExecutorMap = new HashMap<>();
     registerHandlers();
-    perfectLink = new PerfectLink(this);
-    bestEffortBroadcast = new BestEffortBroadcast(this);
-    atomicRegister = new NNAtomicRegister(this);
   }
 
   public Map<String, List<CommunicationProtocol.ProcessId>> getSystems() {
@@ -59,7 +55,17 @@ public class QueueProcessor implements Runnable {
             + this.index
             + " for system "
             + message.getSystemId());
-    this.systems.put(message.getSystemId(), message.getProcInitializeSystem().getProcessesList());
+    List<CommunicationProtocol.ProcessId> processIds =
+        message.getProcInitializeSystem().getProcessesList();
+    processIds.forEach(
+        processId -> {
+          if (processId.getPort() == this.listeningPort) {
+            this.ownerProcess = processId;
+          }
+        });
+    this.systems.put(message.getSystemId(), processIds);
+    this.pipelineExecutorMap.put(
+        message.getSystemId(), new PipelineExecutor(this, message.getSystemId()));
   }
 
   private void handleProcessDestroySystemMessageHandler(CommunicationProtocol.Message message) {
@@ -69,13 +75,18 @@ public class QueueProcessor implements Runnable {
             + " for system "
             + message.getSystemId());
     this.systems.remove(message.getSystemId());
+    this.pipelineExecutorMap.remove(message.getSystemId());
   }
 
   private void handleAppValue(CommunicationProtocol.Message message) {
     System.out.printf(
         "%d Received value: %d\n", this.index, message.getAppValue().getValue().getV());
+    String systemId = message.getSystemId();
 
-    this.messages.add(
+    var executor = this.pipelineExecutorMap.get(systemId);
+
+    executor.submitToPipeline(
+        "app.pl",
         MessageComposer.createPlSend(
             message.getSystemId(),
             CommunicationProtocol.ProcessId.newBuilder()
@@ -87,39 +98,64 @@ public class QueueProcessor implements Runnable {
                 .setType(CommunicationProtocol.Message.Type.APP_VALUE)
                 .setAppValue(message.getAppValue())
                 .build()));
+
+    //    this.messages.add(
+    //        MessageComposer.createPlSend(
+    //            message.getSystemId(),
+    //            CommunicationProtocol.ProcessId.newBuilder()
+    //                .setHost(this.hubIp)
+    //                .setPort(this.hubPort)
+    //                .build(),
+    //            "app.pl",
+    //            CommunicationProtocol.Message.newBuilder()
+    //                .setType(CommunicationProtocol.Message.Type.APP_VALUE)
+    //                .setAppValue(message.getAppValue())
+    //                .build()));
   }
 
   private void handleAppBroadcast(CommunicationProtocol.Message message) {
     System.out.println("App broadcast");
-    System.out.println(message);
     CommunicationProtocol.AppBroadcast appBroadcast = message.getAppBroadcast();
     String messageSystemId = message.getSystemId();
-    System.out.println(this.systems.keySet());
     if (!this.systems.containsKey(messageSystemId)) {
       System.out.println("System is not detected inside the app!");
       return;
     }
 
-    this.messages.add(
+    var executor = this.pipelineExecutorMap.get(messageSystemId);
+
+    executor.submitToPipeline(
+        "app.beb.pl",
         MessageComposer.createBebBroadcast(
             messageSystemId, MessageComposer.createAppValue(appBroadcast.getValue())));
+
+    //    this.messages.add(
+    //        MessageComposer.createBebBroadcast(
+    //            messageSystemId, MessageComposer.createAppValue(appBroadcast.getValue())));
   }
 
   private void handleAppWrite(CommunicationProtocol.Message message) {
     String register = message.getAppWrite().getRegister();
     CommunicationProtocol.Value value = message.getAppWrite().getValue();
     String messageSystemId = message.getSystemId();
+    var executor = this.pipelineExecutorMap.get(messageSystemId);
+    String pipelineID = "app.nnar[" + register + "].beb.pl";
+
     System.out.printf(
         "%d Starts writing register %s value: %d\n", this.index, register, value.getV());
-    this.messages.add(MessageComposer.createNNarWrite(register, value.getV(), messageSystemId));
+    executor.submitToPipeline(
+        pipelineID, MessageComposer.createNNarWrite(register, value.getV(), messageSystemId));
   }
 
   private void handleAppRead(CommunicationProtocol.Message message) {
     String register = message.getAppRead().getRegister();
     String messageSystemId = message.getSystemId();
-    System.out.printf(
-        "%d Starts reading register %s\n", this.index, register);
-    this.messages.add(MessageComposer.createNNARRead(register, messageSystemId));
+    var executor = this.pipelineExecutorMap.get(messageSystemId);
+    String pipelineID = "app.nnar[" + register + "].beb.pl";
+
+    System.out.printf("%d Starts reading register %s\n", this.index, register);
+    executor.submitToPipeline(
+        pipelineID, MessageComposer.createNNARRead(register, messageSystemId));
   }
 
   private void handleNNARReadReturn(CommunicationProtocol.Message message) {
@@ -127,8 +163,13 @@ public class QueueProcessor implements Runnable {
     boolean defined = message.getNnarReadReturn().getValue().getDefined();
     int readValue = message.getNnarReadReturn().getValue().getV();
     String register = Utils.getRegisterIdFromAbstraction(message.getFromAbstractionId());
-    System.out.printf("%d Read value: %d from register (isDefined:%s) %s\n", this.index, readValue, defined, register);
-    this.messages.add(
+    System.out.printf(
+        "%d Read value: %d from register (isDefined:%s) %s\n",
+        this.index, readValue, defined, register);
+    var executor = this.pipelineExecutorMap.get(systemId);
+
+    executor.submitToPipeline(
+        "app.pl",
         MessageComposer.createAppReadReturnPlSend(
             systemId,
             CommunicationProtocol.ProcessId.newBuilder()
@@ -143,7 +184,9 @@ public class QueueProcessor implements Runnable {
     String systemId = message.getSystemId();
     String register = Utils.getRegisterIdFromAbstraction(message.getFromAbstractionId());
     System.out.printf("%d Register %s writing done", this.index, register);
-    this.messages.add(
+    var executor = this.pipelineExecutorMap.get(systemId);
+    executor.submitToPipeline(
+        "app.pl",
         MessageComposer.createAppWriteReturn(
             systemId,
             CommunicationProtocol.ProcessId.newBuilder()
@@ -153,10 +196,124 @@ public class QueueProcessor implements Runnable {
             register));
   }
 
+  private void handleAppPropose(CommunicationProtocol.Message message) {
+//    System.out.println(message);
+    String systemId = message.getSystemId();
+    String topicName = message.getAppPropose().getTopic();
+    CommunicationProtocol.Message ucMessage =
+        CommunicationProtocol.Message.newBuilder()
+            .setSystemId(systemId)
+            .setToAbstractionId("app.uc[" + topicName + "].ec.pl")
+            .setType(CommunicationProtocol.Message.Type.UC_PROPOSE)
+            .setUcPropose(
+                CommunicationProtocol.UcPropose.newBuilder()
+                    .setValue(message.getAppPropose().getValue())
+                    .build())
+            .build();
+    System.out.println(
+        "App Received Rank: "
+            + this.getOwnerProcess().getRank()
+            + " Propose Value: "
+            + message.getAppPropose().getValue().getV()
+            + " in topic: "
+            + message.getAppPropose().getTopic());
+    var executor = this.pipelineExecutorMap.get(systemId);
+    executor.submitToPipeline("app.uc[" + topicName + "].ec.pl", ucMessage);
+  }
+
+  private void handleUcDecide(CommunicationProtocol.Message message) {
+
+    String systemID = message.getSystemId();
+
+    // string register = m.AppWrite.Register;
+    int value = message.getUcDecide().getValue().getV();
+
+    System.out.println(this.index + " Decided: " + value);
+
+    CommunicationProtocol.Message payloadMessage =
+        CommunicationProtocol.Message.newBuilder()
+            .setSystemId(systemID)
+            .setType(CommunicationProtocol.Message.Type.PL_SEND)
+            .setPlSend(
+                CommunicationProtocol.PlSend.newBuilder()
+                    .setDestination(
+                        CommunicationProtocol.ProcessId.newBuilder()
+                            .setHost(this.hubIp)
+                            .setPort(this.hubPort)
+                            .build())
+                    .setMessage(
+                        CommunicationProtocol.Message.newBuilder()
+                            .setToAbstractionId("hub")
+                            .setType(CommunicationProtocol.Message.Type.APP_DECIDE)
+                            .setAppDecide(
+                                CommunicationProtocol.AppDecide.newBuilder()
+                                    .setValue(
+                                        CommunicationProtocol.Value.newBuilder()
+                                            .setDefined(message.getUcDecide().getValue().getDefined())
+                                            .setV(value)
+                                            .build())
+                                    .build())
+                            .build())
+                    .build())
+            .build();
+    var executor = this.pipelineExecutorMap.get(systemID);
+    executor.submitToPipeline("app.pl", payloadMessage);
+  }
+
   private void handleMessage(CommunicationProtocol.Message message) {
     //    System.out.println(topLevelMessage);
     //    System.out.println("Message from abstraction " + topLevelMessage.getFromAbstractionId());
     //    System.out.println("Message to abstraction " + topLevelMessage.getToAbstractionId());
+    //    switch (message.getType()) {
+    //      case PROC_INITIALIZE_SYSTEM -> {
+    //        this.handleProcessInitializeSystemMessageHandler(message);
+    //      }
+    //      case PROC_DESTROY_SYSTEM -> {
+    //        handleProcessDestroySystemMessageHandler(message);
+    //      }
+    //      case APP_VALUE -> {
+    //        handleAppValue(message);
+    //      }
+    //      case NNAR_READ, NNAR_WRITE -> {
+    //        atomicRegister.send(message);
+    //      }
+    //      case NNAR_INTERNAL_READ, NNAR_INTERNAL_WRITE, NNAR_INTERNAL_ACK, NNAR_INTERNAL_VALUE ->
+    // {
+    //        atomicRegister.deliver(message);
+    //      }
+    //      case NNAR_READ_RETURN -> {
+    //        handleNNARReadReturn(message);
+    //      }
+    //      case NNAR_WRITE_RETURN -> {
+    //        handleNNARWriteReturn(message);
+    //      }
+    //      case APP_READ -> {
+    //        handleAppRead(message);
+    //      }
+    //      case APP_WRITE -> {
+    //        handleAppWrite(message);
+    //      }
+    //      case APP_BROADCAST -> {
+    //        handleAppBroadcast(message);
+    //      }
+    //      case BEB_BROADCAST -> {
+    //        this.bestEffortBroadcast.send(message);
+    //      }
+    //      case BEB_DELIVER -> {
+    //        this.bestEffortBroadcast.deliver(message);
+    //      }
+    //      case PL_SEND -> {
+    //        this.perfectLink.send(message);
+    //      }
+    //      case PL_DELIVER -> {
+    //        this.
+    //      }
+    //      default -> {
+    //        System.out.println("UNKNOWN -- " + message.getType());
+    //        System.out.println(message);
+    //      }
+    //    }
+
     switch (message.getType()) {
       case PROC_INITIALIZE_SYSTEM -> {
         this.handleProcessInitializeSystemMessageHandler(message);
@@ -165,13 +322,10 @@ public class QueueProcessor implements Runnable {
         handleProcessDestroySystemMessageHandler(message);
       }
       case APP_VALUE -> {
-        handleAppValue(message);
+        this.handleAppValue(message);
       }
-      case NNAR_READ, NNAR_WRITE -> {
-        atomicRegister.send(message);
-      }
-      case NNAR_INTERNAL_READ, NNAR_INTERNAL_WRITE, NNAR_INTERNAL_ACK, NNAR_INTERNAL_VALUE -> {
-        atomicRegister.deliver(message);
+      case APP_BROADCAST -> {
+        handleAppBroadcast(message);
       }
       case NNAR_READ_RETURN -> {
         handleNNARReadReturn(message);
@@ -179,26 +333,27 @@ public class QueueProcessor implements Runnable {
       case NNAR_WRITE_RETURN -> {
         handleNNARWriteReturn(message);
       }
-      case APP_READ -> {
-        handleAppRead(message);
+      case PL_DELIVER -> {
+        this.messages.add(
+            CommunicationProtocol.Message.newBuilder(message.getPlDeliver().getMessage())
+                .setPlDeliver(
+                    CommunicationProtocol.PlDeliver.newBuilder()
+                        .setSender(message.getPlDeliver().getSender())
+                        .build())
+                .setSystemId(message.getSystemId())
+                .build());
       }
       case APP_WRITE -> {
         handleAppWrite(message);
       }
-      case APP_BROADCAST -> {
-        handleAppBroadcast(message);
+      case APP_READ -> {
+        handleAppRead(message);
       }
-      case BEB_BROADCAST -> {
-        this.bestEffortBroadcast.send(message);
+      case APP_PROPOSE -> {
+        handleAppPropose(message);
       }
-      case BEB_DELIVER -> {
-        this.bestEffortBroadcast.deliver(message);
-      }
-      case PL_SEND -> {
-        this.perfectLink.send(message);
-      }
-      case PL_DELIVER -> {
-        this.perfectLink.deliver(message);
+      case UC_DECIDE -> {
+        handleUcDecide(message);
       }
       default -> {
         System.out.println("UNKNOWN -- " + message.getType());
@@ -241,5 +396,18 @@ public class QueueProcessor implements Runnable {
 
   public int getHubPort() {
     return hubPort;
+  }
+
+  public CommunicationProtocol.ProcessId getOwnerProcess() {
+    return ownerProcess;
+  }
+
+  public void submitToSystemExecutorBottomUp(
+      String systemId, String pipelineId, CommunicationProtocol.Message message) {
+    //    System.out.println(pipelineId);
+    //    System.out.println(message.getType());
+    //    System.out.println(message.getPlDeliver().getMessage().getType());
+    var executor = this.pipelineExecutorMap.get(systemId);
+    executor.submitToPipeline(pipelineId, message);
   }
 }
